@@ -10,6 +10,12 @@ API_KEY = st.secrets["FOOTBALL_API_KEY"]
 HEADERS = {"X-Auth-Token": API_KEY}
 BASE_URL = "http://api.football-data.org/v4/"
 teams = ["ΠΑΟΚ", "ΑΕΚ", "Ολυμπιακός", "Παναθηναϊκός"]
+team_mapping = {
+    "ΠΑΟΚ": "PAOK FC",
+    "ΑΕΚ": "AEK Athens FC",
+    "Ολυμπιακός": "Olympiacos Piraeus",
+    "Παναθηναϊκός": "Panathinaikos FC"
+}
 home_team = st.selectbox("Ομάδα Γηπεδούχου", teams)
 away_team = st.selectbox("Ομάδα Φιλοξενούμενου", teams)
 data = {
@@ -26,23 +32,45 @@ scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 model = LogisticRegression(multi_class='multinomial', random_state=42)
 model.fit(X_scaled, y)
+def get_competition_id():
+    try:
+        url = f"{BASE_URL}competitions"
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        competitions = response.json().get('competitions', [])
+        for comp in competitions:
+            if comp['name'] == "Super League" and comp['area']['name'] == "Greece":
+                return comp['id']
+        st.error("Δεν βρέθηκε ID για Ελληνική Super League. Προσπαθήστε ξανά ή ελέγξτε το API.")
+        return None
+    except Exception as e:
+        st.error(f"Σφάλμα εύρεσης ID διοργάνωσης: {str(e)}")
+        return None
 def fetch_team_stats(home_team, away_team):
     try:
-        url = f"{BASE_URL}competitions/2016/matches?status=FINISHED&limit=10"
+        comp_id = get_competition_id()
+        if not comp_id:
+            return None
+        url = f"{BASE_URL}competitions/{comp_id}/matches?status=FINISHED&limit=20"
         response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
         matches = response.json().get('matches', [])
         home_goals, away_goals, home_form, away_form = [], [], [], []
+        home_api_name = team_mapping.get(home_team, home_team)
+        away_api_name = team_mapping.get(away_team, away_team)
+        match_count = 0
         for match in matches:
             home = match['homeTeam']['name']
             away = match['awayTeam']['name']
             score = match['score']['fullTime']
-            if home in teams and away in teams:
+            if home == home_api_name or away == away_api_name:
                 home_goals.append(score['home'] or 0)
                 away_goals.append(score['away'] or 0)
                 home_form.append(0.8 if score['home'] > score['away'] else 0.5 if score['home'] == score['away'] else 0.3)
                 away_form.append(0.8 if score['away'] > score['home'] else 0.5 if score['away'] == score['home'] else 0.3)
-        if home_goals and away_goals:
+                match_count += 1
+        if match_count > 0:
+            st.write(f"Βρέθηκαν {match_count} ματς για {home_api_name} ή {away_api_name}.")
             return {
                 'home_goals': np.mean(home_goals),
                 'away_goals': np.mean(away_goals),
@@ -50,8 +78,10 @@ def fetch_team_stats(home_team, away_team):
                 'away_form': np.mean(away_form)
             }
         else:
+            st.warning(f"Κανένα ματς για {home_api_name} ή {away_api_name}.")
             return None
-    except:
+    except Exception as e:
+        st.error(f"Σφάλμα API: {str(e)}")
         return None
 if st.button("Πρόβλεψη"):
     stats = fetch_team_stats(home_team, away_team)
