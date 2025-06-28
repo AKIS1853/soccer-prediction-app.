@@ -7,7 +7,7 @@ import numpy as np
 import time
 
 st.title("Cyprus First Division AI Prediction ⚽")
-st.write("Select teams for an AI-powered match prediction!")
+st.write("Select teams for an AI-powered match prediction with odds!")
 
 API_KEY = st.secrets["API_FOOTBALL_KEY"]
 HEADERS = {"X-RapidAPI-Key": API_KEY, "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"}
@@ -82,16 +82,33 @@ def get_competition_id():
         st.error(f"Error fetching league ID: {str(e)}. Using fallback ID.")
         return 203
 
+def fetch_odds(league_id, home_team_id, away_team_id, season):
+    try:
+        odds_url = f"{BASE_URL}odds?league={league_id}&season={season}&bookmaker=5&page=1"
+        response = api_request(odds_url)
+        if not response:
+            return None
+        odds_data = response.json().get('response', [])
+        for match in odds_data:
+            if match['fixture']['home']['id'] == home_team_id and match['fixture']['away']['id'] == away_team_id:
+                for bet in match['bookmakers'][0]['bets']:
+                    if bet['name'] == "Match Winner":
+                        return {v['name']: v['odd'] for v in bet['values']}
+        return None
+    except Exception as e:
+        st.error(f"Error fetching odds: {str(e)}")
+        return None
+
 def fetch_team_stats(home_team, away_team):
     try:
         league_id = get_competition_id()
         if not league_id:
-            return None
-        season = 2024  # 2024–25 season
+            return None, None
+        season = 2024
         teams_url = f"{BASE_URL}teams?league={league_id}&season={season}"
         response = api_request(teams_url)
         if not response:
-            return None
+            return None, None
         teams_data = response.json().get('response', [])
         team_ids = {team['team']['name']: team['team']['id'] for team in teams_data}
         
@@ -99,13 +116,13 @@ def fetch_team_stats(home_team, away_team):
         away_api_name = team_mapping.get(away_team, away_team)
         if home_api_name not in team_ids or away_api_name not in team_ids:
             st.warning(f"Teams not found: {home_api_name} or {away_api_name}. Available: {', '.join(team_ids.keys())}")
-            return None
+            return None, None
         
         # Fetch team stats
         home_stats = api_request(f"{BASE_URL}teams/statistics?league={league_id}&season={season}&team={team_ids[home_api_name]}")
         away_stats = api_request(f"{BASE_URL}teams/statistics?league={league_id}&season={season}&team={team_ids[away_api_name]}")
         if not home_stats or not away_stats:
-            return None
+            return None, None
         home_stats = home_stats.json()['response']
         away_stats = away_stats.json()['response']
         
@@ -114,7 +131,7 @@ def fetch_team_stats(home_team, away_team):
         home_players = api_request(f"{players_url}&team={team_ids[home_api_name]}")
         away_players = api_request(f"{players_url}&team={team_ids[away_api_name]}")
         if not home_players or not away_players:
-            return None
+            return None, None
         home_players = home_players.json()['response']
         away_players = away_players.json()['response']
         
@@ -135,6 +152,11 @@ def fetch_team_stats(home_team, away_team):
         st.write(f"Key Players - {home_team}: {home_top_player['player']['name']} ({home_top_player['statistics'][0]['goals']['total']} goals)")
         st.write(f"Key Players - {away_team}: {away_top_player['player']['name']} ({away_top_player['statistics'][0]['goals']['total']} goals)")
         
+        # Fetch odds
+        odds = fetch_odds(league_id, team_ids[home_api_name], team_ids[away_api_name], season)
+        if odds:
+            st.write(f"Betting Odds (Bookmaker 5): Home: {odds.get('Home', 'N/A')}, Draw: {odds.get('Draw', 'N/A')}, Away: {odds.get('Away', 'N/A')}")
+        
         return {
             'home_goals': home_goals * 1.2,
             'away_goals': away_goals * 1.2,
@@ -144,13 +166,13 @@ def fetch_team_stats(home_team, away_team):
             'away_possession': away_possession,
             'home_shots': home_shots,
             'away_shots': away_shots
-        }
+        }, odds
     except Exception as e:
         st.error(f"API Error: {str(e)}")
-        return None
+        return None, None
 
 if st.button("Predict Match"):
-    stats = fetch_team_stats(home_team, away_team)
+    stats, odds = fetch_team_stats(home_team, away_team)
     if stats is None:
         st.warning("No data found. Using fallback stats.")
         stats = {'home_goals': 1.0, 'away_goals': 1.0, 'home_form': 0.5, 'away_form': 0.5, 
@@ -165,5 +187,3 @@ if st.button("Predict Match"):
     
     st.success(f"Prediction: **{prediction.replace('home_win', 'Home Win').replace('away_win', 'Away Win').replace('draw', 'Draw')}**")
     st.write(f"Home Win ({home_team}): {prob_dict['home_win']}%")
-    st.write(f"Draw: {prob_dict['draw']}%")
-    st.write(f"Away Win ({away_team}): {prob_dict['away_win']}%")
