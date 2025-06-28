@@ -4,6 +4,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 import numpy as np
+import time
 
 st.title("Cyprus First Division AI Prediction ⚽")
 st.write("Select teams for an AI-powered match prediction!")
@@ -45,17 +46,38 @@ X_scaled = scaler.fit_transform(X)
 model = LogisticRegression(multi_class='multinomial', random_state=42)
 model.fit(X_scaled, y)
 
+def api_request(url, retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, headers=HEADERS)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 429:
+                st.warning(f"Rate limit hit. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            elif response.status_code == 403:
+                st.error("Invalid API key. Please check API_FOOTBALL_KEY in Streamlit Secrets.")
+                return None
+            else:
+                raise e
+    st.error(f"Failed after {retries} retries: {str(e)}")
+    return None
+
 def get_competition_id():
     try:
         url = f"{BASE_URL}leagues?country=Cyprus"
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
+        response = api_request(url)
+        if not response:
+            st.error("No ID found for Cyprus First Division. Using fallback ID.")
+            return 203
         leagues = response.json().get('response', [])
         for league in leagues:
             if league['league']['name'] == "1. Division":
                 return league['league']['id']
         st.error("No ID found for Cyprus First Division. Using fallback ID.")
-        return 203  # Fallback ID for Cyprus First Division
+        return 203  # Fallback ID
     except Exception as e:
         st.error(f"Error fetching league ID: {str(e)}. Using fallback ID.")
         return 203
@@ -65,39 +87,40 @@ def fetch_team_stats(home_team, away_team):
         league_id = get_competition_id()
         if not league_id:
             return None
-        season = 2024  # Adjust for 2024–25 season
-        url = f"{BASE_URL}teams/statistics?league={league_id}&season={season}"
+        season = 2024  # 2024–25 season
+        teams_url = f"{BASE_URL}teams?league={league_id}&season={season}"
+        response = api_request(teams_url)
+        if not response:
+            return None
+        teams_data = response.json().get('response', [])
+        team_ids = {team['team']['name']: team['team']['id'] for team in teams_data}
+        
         home_api_name = team_mapping.get(home_team, home_team)
         away_api_name = team_mapping.get(away_team, away_team)
-        
-        # Fetch team IDs
-        teams_url = f"{BASE_URL}teams?league={league_id}&season={season}"
-        teams_response = requests.get(teams_url, headers=HEADERS)
-        teams_response.raise_for_status()
-        teams_data = teams_response.json().get('response', [])
-        team_ids = {}
-        for team in teams_data:
-            team_name = team['team']['name']
-            team_ids[team_name] = team['team']['id']
-        
         if home_api_name not in team_ids or away_api_name not in team_ids:
-            st.warning(f"Teams not found: {home_api_name} or {away_api_name}.")
+            st.warning(f"Teams not found: {home_api_name} or {away_api_name}. Available: {', '.join(team_ids.keys())}")
             return None
         
         # Fetch team stats
-        home_stats = requests.get(f"{BASE_URL}teams/statistics?league={league_id}&season={season}&team={team_ids[home_api_name]}", headers=HEADERS).json()['response']
-        away_stats = requests.get(f"{BASE_URL}teams/statistics?league={league_id}&season={season}&team={team_ids[away_api_name]}", headers=HEADERS).json()['response']
+        home_stats = api_request(f"{BASE_URL}teams/statistics?league={league_id}&season={season}&team={team_ids[home_api_name]}")
+        away_stats = api_request(f"{BASE_URL}teams/statistics?league={league_id}&season={season}&team={team_ids[away_api_name]}")
+        if not home_stats or not away_stats:
+            return None
+        home_stats = home_stats.json()['response']
+        away_stats = away_stats.json()['response']
         
         # Fetch player stats
         players_url = f"{BASE_URL}players?league={league_id}&season={season}"
-        home_players = requests.get(f"{players_url}&team={team_ids[home_api_name]}", headers=HEADERS).json()['response']
-        away_players = requests.get(f"{players_url}&team={team_ids[away_api_name]}", headers=HEADERS).json()['response']
+        home_players = api_request(f"{players_url}&team={team_ids[home_api_name]}")
+        away_players = api_request(f"{players_url}&team={team_ids[away_api_name]}")
+        if not home_players or not away_players:
+            return None
+        home_players = home_players.json()['response']
+        away_players = away_players.json()['response']
         
-        # Aggregate player stats (e.g., top scorer goals)
-        home_goals = sum([p['statistics'][0]['goals']['total'] or 0 for p in home_players[:5]]) / 5  # Top 5 players
+        # Aggregate player stats
+        home_goals = sum([p['statistics'][0]['goals']['total'] or 0 for p in home_players[:5]]) / 5
         away_goals = sum([p['statistics'][0]['goals']['total'] or 0 for p in away_players[:5]]) / 5
-        
-        # Team stats
         home_form = float(home_stats['form'].count('W')) / max(len(home_stats['form']), 1)
         away_form = float(away_stats['form'].count('W')) / max(len(away_stats['form']), 1)
         home_possession = float(home_stats['fixtures']['possession']['average'] or 50)
@@ -113,7 +136,7 @@ def fetch_team_stats(home_team, away_team):
         st.write(f"Key Players - {away_team}: {away_top_player['player']['name']} ({away_top_player['statistics'][0]['goals']['total']} goals)")
         
         return {
-            'home_goals': home_goals * 1.2,  # Boost player goals
+            'home_goals': home_goals * 1.2,
             'away_goals': away_goals * 1.2,
             'home_form': home_form,
             'away_form': away_form,
